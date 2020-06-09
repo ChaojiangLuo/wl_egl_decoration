@@ -62,8 +62,6 @@ struct display {
 		EGLConfig conf;
 	} egl;
 	struct window *window;
-
-	PFNEGLSWAPBUFFERSWITHDAMAGEEXTPROC swap_buffers_with_damage;
 };
 
 struct geometry {
@@ -73,65 +71,27 @@ struct geometry {
 struct window {
 	struct display *display;
 	struct geometry geometry, window_size;
-	struct {
-		GLuint rotation_uniform;
-		GLuint pos;
-		GLuint col;
-	} gl;
 
 	uint32_t benchmark_time, frames;
 	struct wl_egl_window *native;
 	struct wl_surface *surface;
 	struct wl_surface *focus;
 	EGLSurface egl_surface;
-	struct wl_callback *callback;
-	int fullscreen, maximized, opaque, buffer_size, frame_sync, delay;
 	bool wait_for_configure;
 	struct libdecor_frame *frame;
 };
-
-static const char *vert_shader_text =
-	"uniform mat4 rotation;\n"
-	"attribute vec4 pos;\n"
-	"attribute vec4 color;\n"
-	"varying vec4 v_color;\n"
-	"void main() {\n"
-	"  gl_Position = rotation * pos;\n"
-	"  v_color = color;\n"
-	"}\n";
-
-static const char *frag_shader_text =
-	"precision mediump float;\n"
-	"varying vec4 v_color;\n"
-	"void main() {\n"
-	"  gl_FragColor = v_color;\n"
-	"}\n";
 
 static int running = 1;
 
 static void
 init_egl(struct display *display, struct window *window)
 {
-	static const struct {
-		char *extension, *entrypoint;
-	} swap_damage_ext_to_entrypoint[] = {
-		{
-			.extension = "EGL_EXT_swap_buffers_with_damage",
-			.entrypoint = "eglSwapBuffersWithDamageEXT",
-		},
-		{
-			.extension = "EGL_KHR_swap_buffers_with_damage",
-			.entrypoint = "eglSwapBuffersWithDamageKHR",
-		},
-	};
-
 	static const EGLint context_attribs[] = {
 		EGL_CONTEXT_CLIENT_VERSION, 2,
 		EGL_NONE
 	};
-	const char *extensions;
 
-	EGLint config_attribs[] = {
+	static const EGLint config_attribs[] = {
 		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
 		EGL_RED_SIZE, 1,
 		EGL_GREEN_SIZE, 1,
@@ -141,12 +101,9 @@ init_egl(struct display *display, struct window *window)
 		EGL_NONE
 	};
 
-	EGLint major, minor, n, count, i, size;
+	EGLint major, minor, n, count;
 	EGLConfig *configs;
 	EGLBoolean ret;
-
-	if (window->opaque || window->buffer_size == 16)
-		config_attribs[9] = 0;
 
 	display->egl.dpy = eglGetDisplay((EGLNativeDisplayType) display->display);
 	assert(display->egl.dpy);
@@ -166,32 +123,15 @@ init_egl(struct display *display, struct window *window)
 			      configs, count, &n);
 	assert(ret && n >= 1);
 
-	for (i = 0; i < n; i++) {
-		eglGetConfigAttrib(display->egl.dpy,
-				   configs[i], EGL_BUFFER_SIZE, &size);
-		if (window->buffer_size == size) {
-			display->egl.conf = configs[i];
-			break;
-		}
-	}
-	free(configs);
-	if (display->egl.conf == NULL) {
-		fprintf(stderr, "did not find config with buffer size %d\n",
-			window->buffer_size);
-		exit(EXIT_FAILURE);
-	}
+	display->egl.conf = configs[0];
 
 	display->egl.ctx = eglCreateContext(display->egl.dpy,
 					    display->egl.conf,
 					    EGL_NO_CONTEXT, context_attribs);
+
+	free(configs);
+
 	assert(display->egl.ctx);
-
-	display->swap_buffers_with_damage = NULL;
-	extensions = eglQueryString(display->egl.dpy, EGL_EXTENSIONS);
-
-	if (display->swap_buffers_with_damage)
-		printf("has EGL_EXT_buffer_age and %s\n", swap_damage_ext_to_entrypoint[i].extension);
-
 }
 
 static void
@@ -199,69 +139,6 @@ fini_egl(struct display *display)
 {
 	eglTerminate(display->egl.dpy);
 	eglReleaseThread();
-}
-
-static GLuint
-create_shader(struct window *window, const char *source, GLenum shader_type)
-{
-	GLuint shader;
-	GLint status;
-
-	shader = glCreateShader(shader_type);
-	assert(shader != 0);
-
-	glShaderSource(shader, 1, (const char **) &source, NULL);
-	glCompileShader(shader);
-
-	glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-	if (!status) {
-		char log[1000];
-		GLsizei len;
-		glGetShaderInfoLog(shader, 1000, &len, log);
-		fprintf(stderr, "Error: compiling %s: %.*s\n",
-			shader_type == GL_VERTEX_SHADER ? "vertex" : "fragment",
-			len, log);
-		exit(1);
-	}
-
-	return shader;
-}
-
-static void
-init_gl(struct window *window)
-{
-	GLuint frag, vert;
-	GLuint program;
-	GLint status;
-
-	frag = create_shader(window, frag_shader_text, GL_FRAGMENT_SHADER);
-	vert = create_shader(window, vert_shader_text, GL_VERTEX_SHADER);
-
-	program = glCreateProgram();
-	glAttachShader(program, frag);
-	glAttachShader(program, vert);
-	glLinkProgram(program);
-
-	glGetProgramiv(program, GL_LINK_STATUS, &status);
-	if (!status) {
-		char log[1000];
-		GLsizei len;
-		glGetProgramInfoLog(program, 1000, &len, log);
-		fprintf(stderr, "Error: linking:\n%.*s\n", len, log);
-		exit(1);
-	}
-
-	glUseProgram(program);
-
-	window->gl.pos = 0;
-	window->gl.col = 1;
-
-	glBindAttribLocation(program, window->gl.pos, "pos");
-	glBindAttribLocation(program, window->gl.col, "color");
-	glLinkProgram(program);
-
-	window->gl.rotation_uniform =
-		glGetUniformLocation(program, "rotation");
 }
 
 static void
@@ -286,9 +163,6 @@ create_surface(struct window *window)
 	ret = eglMakeCurrent(window->display->egl.dpy, window->egl_surface,
 			     window->egl_surface, window->display->egl.ctx);
 	assert(ret == EGL_TRUE);
-
-	if (!window->frame_sync)
-		eglSwapInterval(display->egl.dpy, 0);
 }
 
 static void
@@ -303,9 +177,6 @@ destroy_surface(struct window *window)
 	wl_egl_window_destroy(window->native);
 
 	wl_surface_destroy(window->surface);
-
-	if (window->callback)
-		wl_callback_destroy(window->callback);
 }
 
 static void
@@ -313,101 +184,10 @@ redraw(void *data, struct wl_callback *callback, uint32_t time)
 {
 	struct window *window = data;
 	struct display *display = window->display;
-	static const GLfloat verts[3][2] = {
-		{ -0.5, -0.5 },
-		{  0.5, -0.5 },
-		{  0,    0.5 }
-	};
-	static const GLfloat colors[3][3] = {
-		{ 1, 0, 0 },
-		{ 0, 1, 0 },
-		{ 0, 0, 1 }
-	};
-	GLfloat angle;
-	GLfloat rotation[4][4] = {
-		{ 1, 0, 0, 0 },
-		{ 0, 1, 0, 0 },
-		{ 0, 0, 1, 0 },
-		{ 0, 0, 0, 1 }
-	};
-	static const uint32_t speed_div = 5, benchmark_interval = 5;
-	struct wl_region *region;
-	EGLint rect[4];
-	EGLint buffer_age = 0;
-	struct timeval tv;
-
-	assert(window->callback == callback);
-	window->callback = NULL;
-
-	if (callback)
-		wl_callback_destroy(callback);
-
-	gettimeofday(&tv, NULL);
-	time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
-	if (window->frames == 0)
-		window->benchmark_time = time;
-	if (time - window->benchmark_time > (benchmark_interval * 1000)) {
-		printf("%d frames in %d seconds: %f fps\n",
-		       window->frames,
-		       benchmark_interval,
-		       (float) window->frames / benchmark_interval);
-		window->benchmark_time = time;
-		window->frames = 0;
-	}
-
-	angle = (time / speed_div) % 360 * M_PI / 180.0;
-	rotation[0][0] =  cos(angle);
-	rotation[0][2] =  sin(angle);
-	rotation[2][0] = -sin(angle);
-	rotation[2][2] =  cos(angle);
-
-	if (display->swap_buffers_with_damage)
-		eglQuerySurface(display->egl.dpy, window->egl_surface,
-				EGL_BUFFER_AGE_EXT, &buffer_age);
-
-	glViewport(0, 0, window->geometry.width, window->geometry.height);
-
-	glUniformMatrix4fv(window->gl.rotation_uniform, 1, GL_FALSE,
-			   (GLfloat *) rotation);
-
-	glClearColor(0.0, 0.0, 0.0, 0.5);
+	glClearColor(1, 0, 0, 1);
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	glVertexAttribPointer(window->gl.pos, 2, GL_FLOAT, GL_FALSE, 0, verts);
-	glVertexAttribPointer(window->gl.col, 3, GL_FLOAT, GL_FALSE, 0, colors);
-	glEnableVertexAttribArray(window->gl.pos);
-	glEnableVertexAttribArray(window->gl.col);
-
-	glDrawArrays(GL_TRIANGLES, 0, 3);
-
-	glDisableVertexAttribArray(window->gl.pos);
-	glDisableVertexAttribArray(window->gl.col);
-
-	usleep(window->delay);
-
-	if (window->opaque || window->fullscreen) {
-		region = wl_compositor_create_region(window->display->compositor);
-		wl_region_add(region, 0, 0,
-			      window->geometry.width,
-			      window->geometry.height);
-		wl_surface_set_opaque_region(window->surface, region);
-		wl_region_destroy(region);
-	} else {
-		wl_surface_set_opaque_region(window->surface, NULL);
-	}
-
-	if (display->swap_buffers_with_damage && buffer_age > 0) {
-		rect[0] = window->geometry.width / 4 - 1;
-		rect[1] = window->geometry.height / 4 - 1;
-		rect[2] = window->geometry.width / 2 + 2;
-		rect[3] = window->geometry.height / 2 + 2;
-		display->swap_buffers_with_damage(display->egl.dpy,
-						  window->egl_surface,
-						  rect, 1);
-	} else {
-		eglSwapBuffers(display->egl.dpy, window->egl_surface);
-	}
-	window->frames++;
+	eglSwapBuffers(display->egl.dpy, window->egl_surface);
 }
 
 static void
@@ -442,20 +222,6 @@ signal_int(int signum)
 }
 
 static void
-usage(int error_code)
-{
-	fprintf(stderr, "Usage: simple-egl [OPTIONS]\n\n"
-		"  -d <us>\tBuffer swap delay in microseconds\n"
-		"  -f\tRun in fullscreen mode\n"
-		"  -o\tCreate an opaque surface\n"
-		"  -s\tUse a 16 bpp EGL config\n"
-		"  -b\tDon't sync to compositor redraw (eglSwapInterval 0)\n"
-		"  -h\tThis help text\n\n");
-
-	exit(error_code);
-}
-
-static void
 frame_configure(struct libdecor_frame *frame,
 		struct libdecor_configuration *configuration,
 		void *user_data)
@@ -463,7 +229,6 @@ frame_configure(struct libdecor_frame *frame,
 	struct window *window = user_data;
 	int width, height;
 	struct libdecor_state *state;
-	enum libdecor_window_state window_state;
 
 	window->wait_for_configure = false;
 
@@ -474,14 +239,8 @@ frame_configure(struct libdecor_frame *frame,
 	}
 
 	if (width > 0 && height > 0) {
-		if (!window->fullscreen && !window->maximized) {
-			window->window_size.width = width;
-			window->window_size.height = height;
-		}
 		window->geometry.width = width;
 		window->geometry.height = height;
-	} else if (!window->fullscreen && !window->maximized) {
-		window->geometry = window->window_size;
 	}
 
 	if (window->native)
@@ -492,12 +251,6 @@ frame_configure(struct libdecor_frame *frame,
 	state = libdecor_state_new(width, height);
 	libdecor_frame_commit(frame, state, configuration);
 	libdecor_state_free(state);
-
-	if (!libdecor_configuration_get_window_state(configuration, &window_state))
-		window_state = LIBDECOR_WINDOW_STATE_NONE;
-
-	window->maximized = window_state & LIBDECOR_WINDOW_STATE_MAXIMIZED;
-	window->fullscreen = window_state & LIBDECOR_WINDOW_STATE_FULLSCREEN;
 }
 
 static void
@@ -527,7 +280,7 @@ main(int argc, char **argv)
 	struct sigaction sigint;
 	struct display display = { 0 };
 	struct window  window  = { 0 };
-	int i, ret = 0;
+	int ret = 0;
 	struct libdecor *context;
 
 	window.display = &display;
@@ -535,26 +288,6 @@ main(int argc, char **argv)
 	window.geometry.width  = 250;
 	window.geometry.height = 250;
 	window.window_size = window.geometry;
-	window.buffer_size = 32;
-	window.frame_sync = 1;
-	window.delay = 0;
-
-	for (i = 1; i < argc; i++) {
-		if (strcmp("-d", argv[i]) == 0 && i+1 < argc)
-			window.delay = atoi(argv[++i]);
-		else if (strcmp("-f", argv[i]) == 0)
-			window.fullscreen = 1;
-		else if (strcmp("-o", argv[i]) == 0)
-			window.opaque = 1;
-		else if (strcmp("-s", argv[i]) == 0)
-			window.buffer_size = 16;
-		else if (strcmp("-b", argv[i]) == 0)
-			window.frame_sync = 0;
-		else if (strcmp("-h", argv[i]) == 0)
-			usage(EXIT_SUCCESS);
-		else
-			usage(EXIT_FAILURE);
-	}
 
 	display.display = wl_display_connect(NULL);
 	assert(display.display);
@@ -567,7 +300,6 @@ main(int argc, char **argv)
 
 	init_egl(&display, &window);
 	create_surface(&window);
-	init_gl(&window);
 
 	sigint.sa_handler = signal_int;
 	sigemptyset(&sigint.sa_mask);
